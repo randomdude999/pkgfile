@@ -143,33 +143,75 @@ std::optional<pkgfile::Result> Pkgfile::ProcessRepo(
     return std::nullopt;
   }
 
-  const char* err;
-  const auto read_archive = ReadArchive::New(fd->fd(), &err);
-  if (read_archive == nullptr) {
-    fprintf(stderr, "failed to create new archive for reading: %s: %s\n",
-            repo.c_str(), err);
-    return std::nullopt;
-  }
+  auto index_offsets_opt = filter.GetIndexOffsets(repo);
+  if(!index_offsets_opt.has_value()) {
+    // either index missing or this filter doesn't support indexing.
+    // fall back to regular repo search
 
-  Result result(repo.stem());
-  ArchiveReader reader(read_archive->read_archive());
-
-  archive_entry* e;
-  while (reader.Next(&e) == ARCHIVE_OK) {
-    const char* entryname = archive_entry_pathname(e);
-
-    Package pkg;
-    if (!ParsePkgname(&pkg, entryname)) {
-      fprintf(stderr, "error parsing pkgname from: %s\n", entryname);
-      continue;
+    const char* err;
+    const auto read_archive = ReadArchive::New(fd->fd(), &err);
+    if (read_archive == nullptr) {
+      fprintf(stderr, "failed to create new archive for reading: %s: %s\n",
+              repo.c_str(), err);
+      return std::nullopt;
     }
 
-    if (entry_callback_(repo.stem(), filter, pkg, &result, &reader) < 0) {
-      break;
-    }
-  }
+    Result result(repo.stem());
+    ArchiveReader reader(read_archive->read_archive());
 
-  return result;
+    archive_entry* e;
+    while (reader.Next(&e) == ARCHIVE_OK) {
+      const char* entryname = archive_entry_pathname(e);
+
+      Package pkg;
+      if (!ParsePkgname(&pkg, entryname)) {
+        fprintf(stderr, "error parsing pkgname from: %s\n", entryname);
+        continue;
+      }
+
+      if (entry_callback_(repo.stem(), filter, pkg, &result, &reader) < 0) {
+        break;
+      }
+    }
+
+    return result;
+  }
+  else {
+    // this filter supports indexing
+    Result result(repo.stem());
+
+    for(uint64_t offset : index_offsets_opt.value()) {
+      lseek(fd->fd(), offset, SEEK_SET);
+      const char* err;
+      const auto read_archive = ReadArchive::New(fd->fd(), &err);
+      if (read_archive == nullptr) {
+        fprintf(stderr, "failed to create new archive for reading: %s: %s\n",
+                repo.c_str(), err);
+        return std::nullopt;
+      }
+
+      ArchiveReader reader(read_archive->read_archive());
+
+      archive_entry* e;
+      if(reader.Next(&e) != ARCHIVE_OK) {
+        fprintf(stderr, "Error reading archive %s\n", repo.c_str());
+        continue;
+      }
+      const char* entryname = archive_entry_pathname(e);
+
+      Package pkg;
+      if (!ParsePkgname(&pkg, entryname)) {
+        fprintf(stderr, "error parsing pkgname from: %s\n", entryname);
+        continue;
+      }
+
+      if (entry_callback_(repo.stem(), filter, pkg, &result, &reader) < 0) {
+        break;
+      }
+    }
+
+    return result;
+  }
 }
 
 int Pkgfile::SearchSingleRepo(const RepoMap& repos,

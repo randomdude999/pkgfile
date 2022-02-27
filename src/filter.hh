@@ -6,6 +6,9 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <optional>
+#include <filesystem>
 
 namespace pkgfile {
 namespace filter {
@@ -14,6 +17,12 @@ class Filter {
  public:
   virtual ~Filter() {}
   virtual bool Matches(std::string_view line) const = 0;
+  // returns nullopt if indexing not available,
+  // returns empty vector when the index confirms there were no matches
+  virtual std::optional<std::vector<size_t>> GetIndexOffsets(const std::filesystem::path repo) const {
+    (void)repo;
+    return std::nullopt;
+  }
 };
 
 class Not : public Filter {
@@ -37,6 +46,7 @@ class And : public Filter {
   bool Matches(std::string_view line) const override {
     return lhs_->Matches(line) && rhs_->Matches(line);
   }
+  std::optional<std::vector<uint64_t>> GetIndexOffsets(const std::filesystem::path repo) const override;
 
  private:
   std::unique_ptr<Filter> lhs_;
@@ -103,9 +113,12 @@ class Basename : public Filter {
   Basename(std::string match, bool case_sensitive);
 
   bool Matches(std::string_view line) const override;
+  std::optional<std::vector<uint64_t>> GetIndexOffsets(const std::filesystem::path repo) const override;
 
  private:
   std::unique_ptr<Exact> predicate_;
+  bool case_sensitive_;
+  std::string match_;
 };
 
 }  // namespace filter

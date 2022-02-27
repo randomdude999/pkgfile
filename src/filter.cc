@@ -1,4 +1,5 @@
 #include "filter.hh"
+#include "archive_io.hh"
 
 #include <fnmatch.h>
 #include <string.h>
@@ -82,7 +83,7 @@ Exact::Exact(std::string match, bool case_sensitive) {
 bool Exact::Matches(std::string_view line) const { return predicate_(line); }
 
 Basename::Basename(std::string match, bool case_sensitive)
-    : predicate_(std::make_unique<Exact>(match, case_sensitive)) {}
+    : predicate_(std::make_unique<Exact>(match, case_sensitive)), case_sensitive_(case_sensitive), match_(match) {}
 
 bool Basename::Matches(std::string_view line) const {
   const auto pos = line.rfind('/');
@@ -91,6 +92,86 @@ bool Basename::Matches(std::string_view line) const {
   }
 
   return predicate_->Matches(line);
+}
+
+static uint64_t fnv_hash(const std::string& str) {
+  uint64_t h = 0xcbf29ce484222325;
+  for(unsigned char c : str) {
+    h = (h * 0x100000001B3) ^ c;
+  }
+  return h;
+}
+
+static uint64_t read_u64(int fd) {
+  uint64_t buf = 0;
+  // TODO: figure out a nice way to do error checking here
+  read(fd, &buf, 8);
+  return buf;
+}
+static uint64_t read_u64_at(int fd, uint64_t off) {
+  lseek(fd, off, SEEK_SET);
+  return read_u64(fd);
+}
+
+std::optional<std::vector<uint64_t>> Basename::GetIndexOffsets(const std::filesystem::path repo) const {
+  // index is case-sensitive only
+  if(!case_sensitive_) return std::nullopt;
+  auto index_path = repo;
+  index_path.replace_extension("basename_index");
+  auto file = ReadOnlyFile::Open(index_path);
+  if (file == nullptr)
+    return std::nullopt;
+  int fd = file->fd();
+
+  uint64_t target_hash = fnv_hash(match_);
+  // index file format:
+  // u64 nb (number of basenames in cache)
+  // nb times: u64 hash, u64 offset
+  // where offset is either 2**63 + archive_index
+  // or an offset into the index file itself, where it represents a list of archive indices
+  uint64_t num_basenames = read_u64(fd);
+  uint64_t lo = 0, hi = num_basenames;
+  uint64_t mid_val;
+  while(lo <= hi) {
+    uint64_t mid = (lo+hi)/2;
+    mid_val = read_u64_at(fd, 16*mid+8);
+    if(mid_val < target_hash) {
+      lo = mid+1;
+    } else if(mid_val > target_hash) {
+      hi = mid-1;
+    } else {
+      break;
+    }
+  }
+
+  if(mid_val != target_hash)
+    return std::vector<uint64_t>();
+
+  uint64_t offset = read_u64(fd);
+  const uint64_t MASK = 1ULL << 63;
+  if(offset & MASK) {
+    std::vector<uint64_t> res = { offset & (MASK-1) };
+    return res;
+  } else {
+    std::vector<uint64_t> res;
+    uint64_t val = read_u64_at(fd, offset);
+    res.push_back(val & (MASK-1));
+    while((val & MASK) == 0ULL) {
+      val = read_u64(fd);
+      res.push_back(val & (MASK-1));
+    }
+    return res;
+  }
+}
+
+std::optional<std::vector<uint64_t>> And::GetIndexOffsets(const std::filesystem::path repo) const {
+	auto lhs_o = lhs_->GetIndexOffsets(repo);
+	auto rhs_o = rhs_->GetIndexOffsets(repo);
+	if(!lhs_o) return rhs_o;
+	if(!rhs_o) return lhs_o;
+  // merging the 2 lists is somewhat nontrivial, and we never do And on 2
+  // indexable filters anyways, so just disable indexing in this case
+  return std::nullopt;
 }
 
 }  // namespace filter
