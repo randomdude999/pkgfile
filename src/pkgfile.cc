@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <vector>
+#include <future>
 
 #include "archive_io.hh"
 #include "compress.hh"
